@@ -57,7 +57,7 @@ getDbCohortAttrCovariatesData <- function(connection,
                                    tempTable = TRUE,
                                    oracleTempSchema = oracleTempSchema)
   }
-  
+
   renderedSql <- SqlRender::loadRenderTranslateSql("GetAttrCovariates.sql",
                                                    packageName = "FeatureExtraction",
                                                    dbms = attr(connection, "dbms"),
@@ -69,6 +69,7 @@ getDbCohortAttrCovariatesData <- function(connection,
                                                    has_include_attr_ids = hasIncludeAttrIds)
   
   covariates <- DatabaseConnector::querySql(connection, renderedSql, snakeCaseToCamelCase = TRUE)  
+
   covariateRefSql <- "SELECT attribute_definition_id AS covariate_id, attribute_name AS covariate_name FROM @attr_database_schema.@attr_definition_table ORDER BY attribute_definition_id"
   covariateRefSql <- SqlRender::render(covariateRefSql,
                                        attr_database_schema = covariateSettings$attrDatabaseSchema,
@@ -150,4 +151,70 @@ createCohortAttrCovariateSettings <- function(analysisId = -1,
   attr(covariateSettings, "fun") <- "getDbCohortAttrCovariatesData"
   class(covariateSettings) <- "covariateSettings"
   return(covariateSettings)
+}
+
+#' Getcovariate information from the file through the cohort_attribute table
+#'
+#' @description
+#'
+#' @param covariateSettings   An object of type \code{covariateSettings} as created using the
+#'                            \code{\link{createCohortAttrCovariateSettings}} function.
+#'
+#' @template GetCovarParams
+#'
+#' @export
+getFileCohortAttrCovariatesData <- function(connection,
+                                          oracleTempSchema = NULL,
+                                          cdmDatabaseSchema,
+                                          cohortTable = "#cohort_person",
+                                          cohortId = -1,
+                                          cdmVersion = "5",
+                                          rowIdField = "subject_id",
+                                          covariateSettings,
+                                          aggregated = FALSE) {
+  if (aggregated) {
+    stop("Aggregation not implemented for covariates from cohort attributes.")
+  }
+  if (cdmVersion == "4") {
+    stop("Common Data Model version 4 is not supported")
+  }
+  start <- Sys.time()
+  writeLines("Constructing covariates from cohort attributes files")
+  
+  renderedSql <- SqlRender::loadRenderTranslateSql("GetPerson.sql",
+                                                   packageName = "FeatureExtraction",
+                                                   dbms = attr(connection, "dbms"),
+                                                   oracleTempSchema = oracleTempSchema,
+                                                   attr_database_schema = covariateSettings$attrDatabaseSchema,
+                                                   cohort_table = cohortTable)
+  
+  person <- DatabaseConnector::querySql(connection, renderedSql, snakeCaseToCamelCase = TRUE)  
+
+  covariates <- readRDS(covariateSettings$covariateFile)
+  # join
+  covariates <- merge(x = person, y  = covariates, by = c("subjectId", "cohortDefinitionId"))
+  covariates <- covariates[c('rowId','covariateId','covariateValue')]
+
+  covariateRef <- readRDS(covariateSettings$covariateRefFile)
+
+  covariateRef$analysisId <- rep(as.numeric(covariateSettings$analysisId), length = nrow(covariateRef))
+  covariateRef$conceptId <- rep(0, length = nrow(covariateRef))
+  
+  analysisRef <- data.frame(analysisId = as.numeric(covariateSettings$analysisId),
+                            analysisName = "Covariates from cohort attributes",
+                            domainId = "Cohort",
+                            startDay = as.numeric(NA),
+                            endDay = as.numeric(NA),
+                            isBinary = if (covariateSettings$isBinary) {"Y"} else {"N"},
+                            missingMeansZero = if (covariateSettings$missingMeansZero) {"Y"} else {"N"})
+  delta <- Sys.time() - start
+  writeLines(paste("Loading took", signif(delta, 3), attr(delta, "units")))
+  
+  result <- Andromeda::andromeda(covariates = covariates, 
+                                 covariateRef = covariateRef, 
+                                 analysisRef = analysisRef)
+  attr(result, "metaData") <- list()
+  class(result) <- "CovariateData"
+  attr(class(result), "package") <- "FeatureExtraction"
+  return(result)
 }
